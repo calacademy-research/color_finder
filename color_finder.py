@@ -8,14 +8,15 @@ import logging
 import shutil  # To copy the image to the specified directory
 
 class ColorImageFinder:
-    def __init__(self, color, base_dir, dest_dir=None):
+    def __init__(self, color, base_dir: str, dest_dir: str):
+        # Hardcoded base directory
         self.base_directory = base_dir
-        if dest_dir is None:
-            self.dest_directory = dest_dir  # Directory to save images that pass the threshold
+        self.dest_directory = dest_dir  # Directory to save images that pass the threshold
         self.color = color.lower()  # Convert color to lowercase for easier comparison
         logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                             format='%(asctime)s - %(levelname)s - %(message)s')
-        # Define RGB bounds for different colors
+
+        # Define RGB bounds for different colors feel free to adjust bounds
         self.color_bounds = {
             'red': (np.array([255, 0, 0], dtype=np.uint8), np.array([255, 250, 255], dtype=np.uint8)),
             'green': (np.array([0, 200, 0], dtype=np.uint8), np.array([100, 255, 100], dtype=np.uint8)),
@@ -25,6 +26,14 @@ class ColorImageFinder:
             'pink': (np.array([150, 50, 100], dtype=np.uint8), np.array([255, 200, 220], dtype=np.uint8)),
             # Add more colors as needed
         }
+
+    def is_within_date_range(self, folder_name, start_date, end_date):
+        try:
+            folder_date_str = folder_name.split('_')[1]  # Assuming date is in the second part: CP1_YYYYMMDD_BATCH
+            folder_date = datetime.strptime(folder_date_str, '%Y%m%d')
+            return start_date <= folder_date <= end_date
+        except (IndexError, ValueError):
+            return False
 
     def count_color_pixels(self, image_path):
         if self.color not in self.color_bounds:
@@ -58,66 +67,74 @@ class ColorImageFinder:
             logging.error(f"Error processing image {image_path}: {e}")
             return 0  # Return 0 if there's an error processing the image
 
-    def find_color_images(self, lower_bound: int, upper_bound: int, filetype: str):
+    def find_color_images(self, start_date: str, end_date: str, lower_bound: int, upper_bound: int):
+        start_date = datetime.strptime(start_date, '%Y%m%d')
+        end_date = datetime.strptime(end_date, '%Y%m%d')
         image_count = 0  # Count of images that pass the threshold
-        # List of directories to scan, starting with the base directory
-        directories_to_scan = [self.base_directory]
 
-        while directories_to_scan:
-            current_directory = directories_to_scan.pop()
-            logging.info(f"Processing directory: {current_directory}")
+        # Walk through all directories in the base directory
+        for folder in os.listdir(self.base_directory):
+            folder_path = os.path.join(self.base_directory, folder)
+            if os.path.isdir(folder_path) and self.is_within_date_range(folder, start_date, end_date):
+                logging.info(f"Processing folder: {folder}")
 
-            for item in os.listdir(current_directory):
-                item_path = os.path.join(current_directory, item)
+                # Check both "undatabased" and "databased" subdirectories
+                for subfolder in ["undatabased", "databased"]:
+                    subfolder_path = os.path.join(folder_path, subfolder)
+                    if os.path.exists(subfolder_path):
+                        for root, _, files in os.walk(subfolder_path):
+                            for file in files:
+                                if "Cover" in file and file.lower().endswith('.tif'):
+                                    image_path = os.path.join(root, file)
+                                    color_percentage = self.count_color_pixels(image_path)
 
-                if os.path.isdir(item_path):
-                    # Add subdirectory to the list for scanning later
-                    directories_to_scan.append(item_path)
-                elif item.lower().endswith(filetype):
-                    # Process the image file
-                    color_percentage = self.count_color_pixels(item_path)
+                                    # If colored pixels exceed the threshold, log it and save the image
+                                    if lower_bound < color_percentage < upper_bound:
+                                        result = f"{image_path} has more than {lower_bound}% " \
+                                                 f"and less than {upper_bound}% {self.color} color: {color_percentage:.2f}%"
+                                        logging.info(result)
 
-                    # If colored pixels exceed the threshold, log it and save the image
-                    if lower_bound < color_percentage < upper_bound:
-                        result = f"{item_path} has more than {lower_bound}% " \
-                                 f"and less than {upper_bound}% {self.color} color: {color_percentage:.2f}%"
-                        logging.info(result)
+                                        # Save the image to the target directory
+                                        if self.dest_directory:
+                                            try:
+                                                save_path = os.path.join(self.dest_directory,
+                                                                         os.path.basename(image_path))
+                                                shutil.copy(image_path, save_path)
+                                                logging.info(f"Saved image to {save_path}")
+                                            except Exception as e:
+                                                logging.error(f"Error saving image {image_path}: {e}")
+                                        image_count += 1
 
-                        # Save the image to the target directory
-                        if self.dest_directory:
-                            try:
-                                save_path = os.path.join(self.dest_directory, os.path.basename(item_path))
-                                shutil.copy(item_path, save_path)
-                                logging.info(f"Saved image to {save_path}")
-                            except Exception as e:
-                                logging.error(f"Error saving image {item_path}: {e}")
-                        image_count += 1
+                # Log and print the count of images that passed the threshold
 
-        # Log and print the count of images that passed the threshold
+            logging.info(f"Total images processed: {image_count}")
 
-        logging.info(f"Total images processed: {image_count}")
-
-        logging.info(f"Total images with more than {lower_bound}% and "
-                     f"less than {upper_bound}% {self.color} color: {image_count}")
+            logging.info(f"Total images with more than {lower_bound}% and "
+                         f"less than {upper_bound}% {self.color} color: {image_count}")
 
 
 def main():
     # Argument parser setup
-    parser = argparse.ArgumentParser(description='Find images with % of specified color range.')
-    parser.add_argument('color', type=str, help='Color to find (e.g., pink, orange)')
+    parser = argparse.ArgumentParser(description='Find images with more than 1% specified color.')
     parser.add_argument('lower_bound', type=int, help='minimum % of color to detect')
     parser.add_argument('upper_bound', type=int, help='maximum % of color to detect', default=100)
-    parser.add_argument('filetype', type=str, help='filetype .png, .jpg, .tif')
-    parser.add_argument('base_dir', type=str, help='image folder to scan')
-    parser.add_argument('dest_dir', type=str, help='image folder to copy detected images to', default=None)
+    parser.add_argument('filetype', type=str, help='filetype .png, .jpg, .tif', default=".tif")
+    parser.add_argument('start_date', type=str, help='Start date in YYYYMMDD format')
+    parser.add_argument('end_date', type=str, help='End date in YYYYMMDD format')
+    parser.add_argument('color', type=str, help='Color to find (e.g., pink, orange)')
 
     args = parser.parse_args()
 
+    base_directory = '/path/to/image/tree'
+    dest_directory = '/path/to/shared/drive/folder'
+
+
     # Initialize the ColorImageFinder with the specified color
-    finder = ColorImageFinder(color=args.color,  base_dir=args.base_dir, dest_dir=args.dest_dir)
+    finder = ColorImageFinder(color=args.color, base_dir=base_directory, dest_dir=dest_directory)
 
     # Run the finder
-    finder.find_color_images(lower_bound=args.lower_bound, upper_bound=args.upper_bound, filetype=args.filetype)
+    finder.find_color_images(start_date=args.start_date,end_date=args.end_date, lower_bound=args.lower_bound,
+                             upper_bound=args.upper_bound)
 
 
 if __name__ == '__main__':
